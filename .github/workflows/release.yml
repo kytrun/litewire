@@ -54,24 +54,33 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v5
 
+      # ------------------------------------------------------------
+      # Rust
+      # ------------------------------------------------------------
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88
           targets: ${{ matrix.target }}
 
+      # ------------------------------------------------------------
+      # Build
+      #
+      # Do not use "\" line continuation here.
+      # GitHub Windows runner uses PowerShell by default.
+      # ------------------------------------------------------------
       - name: Build
-        run: |
-          cargo build \
-            --release \
-            --package litewire \
-            --target "${{ matrix.target }}" \
-            --features "cli,postgres,tds"
+        run: cargo build --release --package litewire --target "${{ matrix.target }}" --features "cli,postgres,tds"
 
-      - name: Prepare archive
+      # ------------------------------------------------------------
+      # Prepare distribution directory
+      # ------------------------------------------------------------
+      - name: Prepare distribution
         shell: bash
         run: |
           set -e
@@ -82,18 +91,26 @@ jobs:
             "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
             "dist/${{ matrix.binary }}"
 
+      # ------------------------------------------------------------
+      # Package Linux / macOS
+      # ------------------------------------------------------------
       - name: Create tar.gz
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           set -e
 
-          ARCHIVE="litewire-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz"
+          archive="litewire-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz"
 
-          tar -czf "$ARCHIVE" \
+          tar -czf "$archive" \
             -C dist \
             "${{ matrix.binary }}"
 
+          echo "Created: $archive"
+
+      # ------------------------------------------------------------
+      # Package Windows
+      # ------------------------------------------------------------
       - name: Create zip
         if: matrix.archive == 'zip'
         shell: pwsh
@@ -104,6 +121,11 @@ jobs:
             -Path "dist/${{ matrix.binary }}" `
             -DestinationPath $archive
 
+          Write-Host "Created: $archive"
+
+      # ------------------------------------------------------------
+      # Upload build artifact
+      # ------------------------------------------------------------
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -113,29 +135,55 @@ jobs:
             litewire-*.zip
           if-no-files-found: error
 
+  # ==================================================================
+  # Create GitHub Release
+  # ==================================================================
   release:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # Download all platform artifacts
+      # ------------------------------------------------------------
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
+      # ------------------------------------------------------------
+      # Show generated files
+      # ------------------------------------------------------------
+      - name: List artifacts
+        run: |
+          echo "Release files:"
+          ls -lah artifacts
+
+      # ------------------------------------------------------------
+      # Generate SHA256 checksums
+      # ------------------------------------------------------------
       - name: Generate checksums
         working-directory: artifacts
         run: |
+          set -e
+
           sha256sum \
             *.tar.gz \
             *.zip \
             > checksums.txt
 
+          echo "Checksums:"
+          cat checksums.txt
+
+      # ------------------------------------------------------------
+      # Create GitHub Release
+      # ------------------------------------------------------------
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
             artifacts/*.tar.gz
