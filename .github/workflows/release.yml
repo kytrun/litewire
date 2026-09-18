@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  RUST_VERSION: "1.88"
+
 jobs:
   build:
     name: Build ${{ matrix.name }}
@@ -16,70 +19,83 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows x86_64
+          # Windows
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: litewire.exe
             archive: zip
+            builder: cargo
 
-          # Linux x86_64
-          - name: linux-x86_64
+          # Linux - musl only
+          - name: linux-x86_64-musl
             os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             binary: litewire
             archive: tar.gz
+            builder: cross
 
-          # Linux ARM64
-          - name: linux-aarch64
-            os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+          - name: linux-aarch64-musl
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
             binary: litewire
             archive: tar.gz
+            builder: cross
 
-          # macOS x86_64
+          # macOS
           - name: macos-x86_64
             os: macos-13
             target: x86_64-apple-darwin
             binary: litewire
             archive: tar.gz
+            builder: cargo
 
-          # macOS ARM64
           - name: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
             binary: litewire
             archive: tar.gz
+            builder: cargo
 
     runs-on: ${{ matrix.os }}
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v5
 
-      # ------------------------------------------------------------
-      # Rust
-      # ------------------------------------------------------------
       - name: Setup Rust
+        if: matrix.builder == 'cargo'
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
-      # ------------------------------------------------------------
-      # Build
-      #
-      # Do not use "\" line continuation here.
-      # GitHub Windows runner uses PowerShell by default.
-      # ------------------------------------------------------------
-      - name: Build
+      - name: Setup Rust
+        if: matrix.builder == 'cross'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install cross
+        if: matrix.builder == 'cross'
+        shell: bash
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build with cargo
+        if: matrix.builder == 'cargo'
         run: cargo build --release --package litewire --target "${{ matrix.target }}" --features "cli,postgres,tds"
 
-      # ------------------------------------------------------------
-      # Prepare distribution directory
-      # ------------------------------------------------------------
+      - name: Build with cross
+        if: matrix.builder == 'cross'
+        shell: bash
+        run: |
+          cross build \
+            --release \
+            --package litewire \
+            --target "${{ matrix.target }}" \
+            --features "cli,postgres,tds"
+
       - name: Prepare distribution
         shell: bash
         run: |
@@ -91,9 +107,21 @@ jobs:
             "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
             "dist/${{ matrix.binary }}"
 
-      # ------------------------------------------------------------
-      # Package Linux / macOS
-      # ------------------------------------------------------------
+          echo "Binary:"
+          ls -lh "dist/${{ matrix.binary }}"
+
+      - name: Check Linux binary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e
+
+          file "dist/${{ matrix.binary }}"
+
+          echo
+          echo "Dynamic dependencies:"
+          ldd "dist/${{ matrix.binary }}" || true
+
       - name: Create tar.gz
         if: matrix.archive == 'tar.gz'
         shell: bash
@@ -106,11 +134,9 @@ jobs:
             -C dist \
             "${{ matrix.binary }}"
 
-          echo "Created: $archive"
+          echo "Created:"
+          ls -lh "$archive"
 
-      # ------------------------------------------------------------
-      # Package Windows
-      # ------------------------------------------------------------
       - name: Create zip
         if: matrix.archive == 'zip'
         shell: pwsh
@@ -121,11 +147,9 @@ jobs:
             -Path "dist/${{ matrix.binary }}" `
             -DestinationPath $archive
 
-          Write-Host "Created: $archive"
+          Write-Host "Created:"
+          Get-Item $archive
 
-      # ------------------------------------------------------------
-      # Upload build artifact
-      # ------------------------------------------------------------
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -135,35 +159,23 @@ jobs:
             litewire-*.zip
           if-no-files-found: error
 
-  # ==================================================================
-  # Create GitHub Release
-  # ==================================================================
   release:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------------
-      # Download all platform artifacts
-      # ------------------------------------------------------------
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      # ------------------------------------------------------------
-      # Show generated files
-      # ------------------------------------------------------------
       - name: List artifacts
         run: |
           echo "Release files:"
           ls -lah artifacts
 
-      # ------------------------------------------------------------
-      # Generate SHA256 checksums
-      # ------------------------------------------------------------
       - name: Generate checksums
         working-directory: artifacts
         run: |
@@ -174,12 +186,10 @@ jobs:
             *.zip \
             > checksums.txt
 
-          echo "Checksums:"
+          echo
+          echo "SHA256:"
           cat checksums.txt
 
-      # ------------------------------------------------------------
-      # Create GitHub Release
-      # ------------------------------------------------------------
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
